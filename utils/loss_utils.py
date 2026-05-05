@@ -71,6 +71,36 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean(1).mean(1).mean(1)
 
 
+def compute_edge_map(gt_obj):
+    """Sobel edge confidence map from integer segmentation labels, normalized to [0, 1]."""
+    gt_float = gt_obj.float().unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                            dtype=torch.float32, device=gt_obj.device).view(1, 1, 3, 3)
+    sobel_y = sobel_x.transpose(2, 3)
+    ex = F.conv2d(gt_float, sobel_x, padding=1)
+    ey = F.conv2d(gt_float, sobel_y, padding=1)
+    edge = torch.sqrt(ex ** 2 + ey ** 2).squeeze()  # [H, W]
+    return torch.clamp(edge / (edge.max() + 1e-6), 0.0, 1.0)
+
+
+def loss_boundary_aware(logits, gt_obj, lambda_val=0.1):
+    """
+    Stage 3 Boundary-Aware Segmentation Regularizer.
+
+    Penalizes blended/soft class predictions at object boundary pixels.
+    Edge confidence from gt_obj weights the penalty: strong at clear SAM/DEVA
+    edges, weak at uncertain or ambiguous regions.
+
+    logits:    [num_classes, H, W] – classifier output on rendered object features
+    gt_obj:    [H, W]              – integer segmentation labels (from SAM/DEVA)
+    lambda_val: loss weight
+    """
+    edge_conf = compute_edge_map(gt_obj)               # [H, W]
+    probs = torch.softmax(logits, dim=0)               # [num_classes, H, W]
+    max_prob = probs.max(dim=0).values                 # [H, W]
+    return lambda_val * (edge_conf * (1.0 - max_prob)).mean()
+
+
 def loss_cls_3d(features, predictions, k=5, lambda_val=2.0, max_points=200000, sample_size=800):
     """
     Compute the neighborhood consistency loss for a 3D point cloud using Top-k neighbors

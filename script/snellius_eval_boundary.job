@@ -1,0 +1,31 @@
+#!/bin/bash
+#SBATCH --job-name=eval-boundary
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --gpus=1
+#SBATCH --mem=32G
+#SBATCH --time=00:30:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+
+# Usage:
+#   sbatch script/snellius_eval_boundary.job <model_path>
+# Example:
+#   sbatch script/snellius_eval_boundary.job output/figurines
+
+MODEL_PATH=${1:?"Usage: sbatch snellius_eval_boundary.job <model_path>"}
+
+module purge
+module load 2023
+module load CUDA/12.1.1
+module load Python/3.11.3-GCCcore-12.3.0
+
+source $HOME/gaussian-grouping/.venv_snellius/bin/activate
+
+mkdir -p logs
+
+python script/eval_boundary.py \
+    -m $MODEL_PATH \
+    --skip_test

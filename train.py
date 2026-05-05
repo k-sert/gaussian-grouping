@@ -9,7 +9,7 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, loss_cls_3d
+from utils.loss_utils import l1_loss, ssim, loss_cls_3d, loss_boundary_aware
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -89,6 +89,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss_obj = cls_criterion(logits.unsqueeze(0), gt_obj.unsqueeze(0)).squeeze().mean()
         loss_obj = loss_obj / torch.log(torch.tensor(num_classes))  # normalize to (0,1)
 
+        # Boundary-Aware Segmentation Regularizer (Stage 3)
+        loss_boundary = loss_boundary_aware(logits, gt_obj, opt.lambda_boundary)
+
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
@@ -99,9 +102,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             logits3d = classifier(gaussians._objects_dc.permute(2,0,1))
             prob_obj3d = torch.softmax(logits3d,dim=0).squeeze().permute(1,0)
             loss_obj_3d = loss_cls_3d(gaussians._xyz.squeeze().detach(), prob_obj3d, opt.reg3d_k, opt.reg3d_lambda_val, opt.reg3d_max_points, opt.reg3d_sample_size)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image)) + loss_obj + loss_obj_3d
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image)) + loss_obj + loss_obj_3d + loss_boundary
         else:
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image)) + loss_obj
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image)) + loss_obj + loss_boundary
 
         loss.backward()
         iter_end.record()
@@ -116,7 +119,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), loss_obj_3d, use_wandb)
+            training_report(iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), loss_obj_3d, loss_boundary, use_wandb)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -161,13 +164,19 @@ def prepare_output_and_logger(args):
         cfg_log_f.write(str(Namespace(**vars(args))))
 
 
-def training_report(iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, loss_obj_3d, use_wandb):
+def training_report(iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, loss_obj_3d, loss_boundary, use_wandb):
 
     if use_wandb:
+        log_dict = {
+            "train_loss_patches/l1_loss": Ll1.item(),
+            "train_loss_patches/total_loss": loss.item(),
+            "train_loss_patches/loss_boundary": loss_boundary.item(),
+            "iter_time": elapsed,
+            "iter": iteration,
+        }
         if loss_obj_3d:
-            wandb.log({"train_loss_patches/l1_loss": Ll1.item(), "train_loss_patches/total_loss": loss.item(), "train_loss_patches/loss_obj_3d": loss_obj_3d.item(), "iter_time": elapsed, "iter": iteration})
-        else:
-            wandb.log({"train_loss_patches/l1_loss": Ll1.item(), "train_loss_patches/total_loss": loss.item(), "iter_time": elapsed, "iter": iteration})
+            log_dict["train_loss_patches/loss_obj_3d"] = loss_obj_3d.item()
+        wandb.log(log_dict)
     
     # Report test and samples of training set
     if iteration in testing_iterations:
@@ -238,6 +247,7 @@ if __name__ == "__main__":
     args.reg3d_lambda_val = config.get("reg3d_lambda_val", 2)
     args.reg3d_max_points = config.get("reg3d_max_points", 300000)
     args.reg3d_sample_size = config.get("reg3d_sample_size", 1000)
+    args.lambda_boundary = config.get("lambda_boundary", 0.1)
     
     print("Optimizing " + args.model_path)
 
