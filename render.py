@@ -9,6 +9,7 @@
 import torch
 from scene import Scene
 import os
+import json
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render
@@ -73,6 +74,23 @@ def visualize_obj(objects):
     return rgb_mask
 
 
+def compute_miou(pred_seg, gt_seg):
+    """Mean IoU over all instance IDs present in the GT (background=0 excluded)."""
+    gt_ids = np.unique(gt_seg)
+    gt_ids = gt_ids[gt_ids != 0]
+    if len(gt_ids) == 0:
+        return float('nan')
+    ious = []
+    for obj_id in gt_ids:
+        pred_mask = (pred_seg == obj_id)
+        gt_mask   = (gt_seg   == obj_id)
+        intersection = (pred_mask & gt_mask).sum()
+        union        = (pred_mask | gt_mask).sum()
+        if union > 0:
+            ious.append(float(intersection) / float(union))
+    return float(np.mean(ious)) if ious else float('nan')
+
+
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, classifier):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
@@ -85,18 +103,23 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(gt_colormask_path, exist_ok=True)
     makedirs(pred_obj_path, exist_ok=True)
 
+    per_view_iou = []
+
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         results = render(view, gaussians, pipeline, background)
         rendering = results["render"]
         rendering_obj = results["render_object"]
-        
+
         logits = classifier(rendering_obj)
-        pred_obj = torch.argmax(logits,dim=0)
+        pred_obj = torch.argmax(logits, dim=0)
+        pred_np  = pred_obj.cpu().numpy().astype(np.int32)
         pred_obj_mask = visualize_obj(pred_obj.cpu().numpy().astype(np.uint8))
-        
 
         gt_objects = view.objects
+        gt_np      = gt_objects.cpu().numpy().astype(np.int32)
         gt_rgb_mask = visualize_obj(gt_objects.cpu().numpy().astype(np.uint8))
+
+        per_view_iou.append(compute_miou(pred_np, gt_np))
 
         rgb_mask = feature_to_rgb(rendering_obj)
         Image.fromarray(rgb_mask).save(os.path.join(colormask_path, '{0:05d}'.format(idx) + ".png"))
@@ -105,6 +128,21 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         gt = view.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+
+    valid_ious = [v for v in per_view_iou if not np.isnan(v)]
+    mean_iou = float(np.mean(valid_ious)) if valid_ious else float('nan')
+    print(f"\n  [{name}] Mean IoU: {mean_iou:.4f}  (over {len(valid_ious)} views)")
+
+    iou_out = {
+        "split": name,
+        "iteration": iteration,
+        "mean_iou": mean_iou,
+        "per_view_iou": per_view_iou,
+    }
+    iou_path = os.path.join(model_path, f"iou_results_{name}_{iteration}.json")
+    with open(iou_path, "w") as f:
+        json.dump(iou_out, f, indent=2)
+    print(f"  IoU results saved to {iou_path}")
 
     out_path = os.path.join(render_path[:-8],'concat')
     makedirs(out_path,exist_ok=True)

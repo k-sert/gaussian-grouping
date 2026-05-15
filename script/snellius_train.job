@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=gaussian-grouping
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
@@ -38,7 +38,11 @@ python train.py \
     -s $DATASET_FOLDER \
     -m $OUTPUT_DIR \
     -r $SCALE \
-    --config_file config_with_boundary.json
+    --config_file config_with_boundary.json \
+    --eval
 
 python render.py \
+    -m $OUTPUT_DIR
+
+python metrics.py \
     -m $OUTPUT_DIR
